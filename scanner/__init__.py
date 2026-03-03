@@ -1,1 +1,1 @@
-"""TW top-stock scanner package powered by yfinance."""
+"""Fugle layered scanner package."""

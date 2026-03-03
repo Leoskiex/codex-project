@@ -1,33 +1,57 @@
-# TW Top-Stock Scanner (yfinance)
+# Fugle 分層掃描器（500 calls/day 版本）
 
-這個專案使用 **yfinance**，不需要 API key，也不需要再處理 Fugle 的每日/每分鐘呼叫上限。
+這個專案實作一個適用於 Fugle API 限額（`500 calls/day`、`60 calls/min`）的「雙層掃描架構」，並整合 **v2/v3 + Pivot Points** 盤後評分。
 
-## 核心做法
+## 架構重點
 
-1. 預設追蹤 `TOP_SYMBOLS`（20 檔台股高流動性權值股）
-2. 每日更新這些股票的最新日 K
-3. 在本地用 **v2/v3 + Pivot Points** 打分與排序
+1. **一次性建立本地資料庫（滾動完成）**
+   - 每天分批抓一部分股票歷史資料（例如 500 檔）
+   - 3~4 天完成全市場初始化
+2. **Layer 1 粗篩（流動性前 N 檔）**
+   - 每日只更新成交值/成交量前 300~400 檔
+3. **Layer 2 精篩（本地計算）**
+   - 在本地資料上跑策略（v2 吸籌、v3 控盤突破、Pivot 低風險加分）
+   - 不增加 API 呼叫
 
-> 雖然不再受 Fugle 額度限制，仍建議先從熱門股開始，訊號品質與執行效率會更穩定。
+## 評分模型
 
-## 評分模型（台股日掃）
+### Pivot Points（以前一日高低收）
 
-- `v2` 假跌破吸籌：最高 30 分
-- `v3` 趨勢/突破/量能 + 延續：最高 60 分
-- `Pivot bonus`：支撐位低風險加分 + 趨勢確認：最高 20 分
+- `P = (High_prev + Low_prev + Close_prev) / 3`
+- `R1 = 2*P - Low_prev`
+- `S1 = 2*P - High_prev`
+- `R2 = P + (High_prev - Low_prev)`
+- `S2 = P - (High_prev - Low_prev)`
+
+### v2（假跌破吸籌）
+
+- `low_today < low_20d`
+- `close_today > low_20d`
+- `volume_today > avg_volume_5 * 1.5`
+- 成立加 `30` 分
+
+### v3（控盤/突破延續）
+
+- `close_today > sma20 > sma60`
+- `close_today >= high_20d`
+- `volume_today > avg_volume_5`
+- 核心成立加 `40` 分
+- `low_today > low_3_days_ago` 再加 `10`
+- 最近 5 日紅K >= 3 再加 `10`
+
+### Pivot bonus
+
+- `close_today <= S2` 加 `15`
+- `close_today <= S1` 加 `10`
+- `close_today > P` 加 `5`
+
+### 總分與狀態
+
+- `total_score = v2 + v3 + pivot_bonus`
 - `total_score >= 70` ⇒ `Strong Candidate`
+- 其他 ⇒ `Watch Only`
 
-## 額外策略：Quality 90 日動能（月度再平衡）
-
-你可以把它當成另一個 spectrum（中期趨勢）策略：
-
-1. `momentum_90d = close_now / close_90d_ago - 1`
-2. 篩選：`momentum_90d > 0.15`
-3. 排名：依 `momentum_90d` 由高到低，取前 `top_n`
-4. 進場：每月第一個交易日等權重買入
-5. 出場：下個月再平衡（若跌破門檻，將被剔除）
-
-## 安裝
+## 快速開始
 
 ```bash
 python -m venv .venv
@@ -35,87 +59,62 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 環境變數
+設定環境變數：
 
 ```bash
-export SCANNER_DB_PATH="market.db"
-# 可選：覆蓋預設熱門股清單（逗號分隔，yfinance ticker 格式）
-export TOP_SYMBOLS="2330.TW,2317.TW,2454.TW"
+export FUGLE_API_KEY="your_key"
+export FUGLE_BASE_URL="https://api.fugle.tw"
+
+# init-db only needs SCANNER_DB_PATH, no API key required
 ```
 
 ## 指令
 
+### 1) 建立/更新資料庫
+
 ```bash
 python -m scanner.main init-db
-python -m scanner.main bootstrap --batch-size 20
-python -m scanner.main daily-scan --top-liquidity 20 --top-candidates 10
 ```
 
-如果你有自己的清單檔案：
+### 2) 分批初始化（每天跑一次）
 
 ```bash
-python -m scanner.main bootstrap --symbols-file symbols.txt --batch-size 50 --offset 0
-python -m scanner.main daily-scan --symbols-file symbols.txt --top-liquidity 30 --top-candidates 15
+python -m scanner.main bootstrap --symbols-file symbols.txt --batch-size 500 --offset 0
 ```
 
-`symbols.txt` 一行一個 ticker（例如 `2330.TW`）。
-
-## Quality 動能模擬
-
-### 線上抓資料（需要可連外）
+### 3) 每日分層掃描
 
 ```bash
-python -m scanner.main quality-sim \
-  --symbols "NVDA,AAPL,MSFT,GOOGL,META,AMZN,AMD" \
-  --lookback-days 90 \
-  --threshold 0.15 \
-  --top-n 3 \
-  --period 3y
+python -m scanner.main daily-scan --top-liquidity 400 --top-candidates 50
 ```
 
-### 離線 CSV 模擬（本 repo 範例）
-
-```bash
-python -m scanner.main quality-sim \
-  --symbols "NVDA,AAPL,MSFT,GOOGL,META,AMZN,AMD" \
-  --prices-file examples/quality_demo_prices.csv \
-  --lookback-days 90 \
-  --threshold 0.15 \
-  --top-n 3
-```
-
-CSV 欄位：`symbol,trade_date,close`
-
-## Top-100 → Top-20/Top-30 Pipeline（離線可跑）
-
-專案提供一份清單與示例資料：
-
-- `examples/tw_top100_symbols.txt`：Top 100 symbols
-- `examples/tw_top100_demo_prices.csv`：示例收盤價序列
-
-執行：
-
-```bash
-python -m scanner.main quality-pipeline \
-  --symbols-file examples/tw_top100_symbols.txt \
-  --prices-file examples/tw_top100_demo_prices.csv \
-  --top-core 20 \
-  --top-quality 20 \
-  --lookback-days 90 \
-  --threshold 0.15
-```
-
-輸出包含：
-
-1. Core basket（前 20）
-2. Quality picks（90 日動能門檻後取前 20）
-3. Top 30 momentum spectrum（7/14/21/30/60/90 日）與狀態：
-   - `Increasing`：短天期動能 > 長天期動能（加速）
-   - `Dropping Off`：短天期動能 < 長天期動能（降速）
-   - `Mixed`：其餘型態
-
-## 輸出欄位
+輸出欄位：
 
 ```text
 symbol  total_score  v2  v3  pivot_bonus  status
 ```
+
+## symbols.txt 格式
+
+每行一個股票代碼：
+
+```text
+2330
+2317
+2454
+...
+```
+
+## 目錄
+
+- `scanner/config.py`：設定管理
+- `scanner/db.py`：SQLite schema 與資料寫入
+- `scanner/rate_limiter.py`：60/min + 500/day 限流
+- `scanner/fugle_client.py`：Fugle API 呼叫封裝
+- `scanner/pipeline.py`：bootstrap + daily scan + v2/v3/pivot 評分
+- `scanner/main.py`：CLI 入口（含 offset 分批初始化）
+
+## 注意
+
+- 實際 API path / 欄位命名可能需依 Fugle 帳號方案微調。
+- `StrategyEngine` 目前實作為可直接替換的版本，便於你客製權重與門檻。

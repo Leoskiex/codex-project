@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS daily_prices (
     turnover REAL,
     PRIMARY KEY (symbol, trade_date)
 );
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    usage_date TEXT PRIMARY KEY,
+    calls INTEGER NOT NULL
+);
 """
 
 
@@ -113,12 +118,6 @@ class Database:
             """,
             (symbol, lookback),
         ).fetchall()
-
-    def latest_trade_date(self) -> str | None:
-        row = self.conn.execute("SELECT MAX(trade_date) AS latest_date FROM daily_prices").fetchone()
-        if row and row["latest_date"]:
-            return str(row["latest_date"])
-        return None
 
     def close(self) -> None:
         self.conn.close()
